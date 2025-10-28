@@ -3,11 +3,22 @@
  * 
  * ESP32 sebagai controller utama yang mengontrol sensor PIR, LED, switch,
  * dan berkomunikasi dengan ESP32-CAM untuk pengambilan gambar.
+ * Dilengkapi OLED display untuk menampilkan status sistem.
  */
 
 #include <Arduino.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+// OLED Display settings
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+#define OLED_ADDRESS 0x3C
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // Pin definitions
 #define PIR_SENSOR_PIN    13
@@ -19,7 +30,10 @@
 // WiFi credentials
 const char* ssid = "Adhyasta";
 const char* password = "juarasatu";
-const char* serverURL = "http://127.0.1.1:5000/upload";
+// ⚠️ GANTI IP INI dengan IP komputer yang menjalankan server!
+// Jalankan: hostname -I
+// Contoh: "http://192.168.1.100:5000/upload"
+const char* serverURL = "http://10.137.208.149:5000/upload";  // GANTI IP INI!
 
 // Global variables
 bool systemArmed = true;
@@ -40,6 +54,8 @@ size_t imageSize = 0;
 void initWiFi();
 void initPins();
 void initCameraSerial();
+void initOLED();
+void updateOLED(String line1, String line2 = "", String line3 = "", String line4 = "");
 bool requestImageFromCAM();
 bool receiveImageData();
 bool uploadImageToServer(uint8_t* imageData, size_t imageLen);
@@ -56,6 +72,11 @@ void setup() {
   Serial.println("========================================");
   
   initPins();
+  initOLED();  // Inisialisasi OLED
+  
+  updateOLED("System Starting", "Please wait...");
+  delay(1000);
+  
   initCameraSerial();
   initWiFi();
   
@@ -71,11 +92,66 @@ void loop() {
     
     if (millis() - lastMonitorTime >= monitorInterval) {
       Serial.println("[STATUS] Monitoring...");
+      updateOLED("Status:", "Monitoring...", 
+                 WiFi.status() == WL_CONNECTED ? "WiFi: OK" : "WiFi: NO",
+                 String("Images: ") + String(imageCount));
       lastMonitorTime = millis();
     }
   }
   
   delay(100);
+}
+
+/**
+ * Inisialisasi OLED Display
+ */
+void initOLED() {
+  Serial.println("[INIT] Menginisialisasi OLED display...");
+  
+  // Inisialisasi I2C untuk OLED (SDA=21, SCL=22 default ESP32)
+  Wire.begin();
+  
+  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDRESS)) {
+    Serial.println("[ERROR] OLED tidak ditemukan!");
+    Serial.println("[ERROR] Cek wiring: SDA=GPIO21, SCL=GPIO22, VCC=3.3V, GND=GND");
+    // Lanjutkan tanpa OLED
+    return;
+  }
+  
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println("Security System");
+  display.println("Initializing...");
+  display.display();
+  
+  Serial.println("[INIT] OLED berhasil diinisialisasi");
+}
+
+/**
+ * Update tampilan OLED
+ */
+void updateOLED(String line1, String line2, String line3, String line4) {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  
+  // Line 1 (Besar)
+  display.setCursor(0, 0);
+  display.setTextSize(2);
+  display.println(line1);
+  
+  // Line 2-4 (Kecil)
+  display.setTextSize(1);
+  display.setCursor(0, 20);
+  display.println(line2);
+  display.setCursor(0, 35);
+  display.println(line3);
+  display.setCursor(0, 50);
+  display.println(line4);
+  
+  display.display();
 }
 
 void initPins() {
@@ -89,6 +165,8 @@ void initPins() {
 
 void initCameraSerial() {
   Serial.println("[INIT] Menginisialisasi komunikasi dengan ESP32-CAM...");
+  updateOLED("Init CAM", "Connecting...");
+  
   Serial2.begin(115200, SERIAL_8N1, RXD2, TXD2);
   delay(1000);
   
@@ -99,12 +177,18 @@ void initCameraSerial() {
     String response = Serial2.readStringUntil('\n');
     if (response.indexOf("READY") >= 0) {
       Serial.println("[INIT] ESP32-CAM berhasil terhubung!");
+      updateOLED("CAM", "Connected!", "", "");
+      delay(1000);
     } else {
       Serial.println("[WARNING] ESP32-CAM merespons tapi status tidak jelas");
+      updateOLED("CAM", "Unknown status", "", "");
+      delay(1000);
     }
   } else {
     Serial.println("[WARNING] ESP32-CAM tidak merespons!");
     Serial.println("[WARNING] Pastikan ESP32-CAM sudah diprogram dan terhubung");
+    updateOLED("CAM ERROR", "Not responding", "Check wiring", "");
+    delay(2000);
   }
 }
 
@@ -112,6 +196,8 @@ void initWiFi() {
   Serial.println("[INIT] Menghubungkan ke WiFi...");
   Serial.print("[INIT] SSID: ");
   Serial.println(ssid);
+  
+  updateOLED("WiFi", String("SSID: ") + String(ssid), "Connecting...");
   
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
@@ -129,8 +215,16 @@ void initWiFi() {
     Serial.println("[INIT] WiFi berhasil terhubung!");
     Serial.print("[INIT] IP Address: ");
     Serial.println(WiFi.localIP());
+    
+    updateOLED("WiFi OK", WiFi.localIP().toString(), "", "");
+    delay(1500);
   } else {
     Serial.println("[ERROR] WiFi gagal terhubung!");
+    Serial.println("[ERROR] Periksa SSID dan password");
+    Serial.println("[ERROR] Pastikan WiFi 2.4GHz (bukan 5GHz)");
+    
+    updateOLED("WiFi ERROR", "Check SSID/Pass", "Use 2.4GHz", "");
+    delay(2000);
   }
 }
 
@@ -241,6 +335,8 @@ void handleMotionDetection() {
       Serial.println("[ALERT] Motion Detected!");
       Serial.println("========================================");
       
+      updateOLED("MOTION!", "Detected", "Capturing...", "");
+      
       digitalWrite(LED_INDICATOR_PIN, HIGH);
       Serial.println("[ACTION] LED dihidupkan");
       
@@ -249,8 +345,12 @@ void handleMotionDetection() {
       if (success) {
         Serial.println("[SUCCESS] Image Captured");
         uploadImageToServer(imageBuffer, imageSize);
+        updateOLED("Image Sent", String("Count: ") + String(imageCount), "", "");
+        delay(1500);
       } else {
         Serial.println("[ERROR] Gagal mengambil gambar");
+        updateOLED("CAM ERROR", "Capture Failed", "", "");
+        delay(2000);
       }
       
       delay(1000);
@@ -278,6 +378,14 @@ void handleSystemSwitch() {
       displayStatus();
       Serial.println("========================================");
       
+      // Update OLED with system status
+      if (systemArmed) {
+        updateOLED("SYSTEM", "ARMED", "Ready to Detect", "");
+      } else {
+        updateOLED("SYSTEM", "DISARMED", "Standby Mode", "");
+      }
+      delay(1500);
+      
       if (!systemArmed) {
         digitalWrite(LED_INDICATOR_PIN, LOW);
       }
@@ -302,4 +410,12 @@ void displayStatus() {
   }
   
   Serial.printf("[STATUS] Images captured: %d\n", imageCount);
+  
+  // Update OLED with comprehensive status
+  String line1 = systemArmed ? "ARMED" : "DISARMED";
+  String line2 = WiFi.status() == WL_CONNECTED ? "WiFi: OK" : "WiFi: FAIL";
+  String line3 = String("Images: ") + String(imageCount);
+  String line4 = "";
+  
+  updateOLED(line1, line2, line3, line4);
 }
