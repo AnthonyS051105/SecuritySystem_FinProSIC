@@ -1,329 +1,305 @@
 /*
- * Mini Security System - ESP32-CAM Slave Module
+ * Mini Security System - ESP32 Controller (Main Board)
  * 
- * Deskripsi:
- * ESP32-CAM sebagai modul kamera yang menerima perintah dari ESP32 controller
- * untuk mengambil foto dan mengirim data gambar via Serial.
- * 
- * Hardware:
- * - ESP32-CAM (AI Thinker module)
- * - MicroSD Card (opsional untuk backup)
- * 
- * Komunikasi Serial2:
- * - ESP32-CAM TX2 (GPIO14) -> ESP32 RX2 (GPIO16)
- * - ESP32-CAM RX2 (GPIO15) <- ESP32 TX2 (GPIO17)
- * - Baudrate: 115200
- * 
- * Protokol Komunikasi:
- * - Perintah dari ESP32: "TEST" -> Response: "READY"
- * - Perintah dari ESP32: "CAPTURE" -> Response: "OK" lalu kirim data
- * - Format data: "SIZE:12345\n" diikuti raw binary JPEG data
- * 
- * CATATAN PENTING:
- * File ini adalah CONTOH untuk diupload ke ESP32-CAM secara terpisah.
- * Untuk menggunakannya:
- * 1. Ubah platformio.ini menjadi board = esp32cam
- * 2. Rename file ini menjadi main.cpp
- * 3. Upload ke ESP32-CAM
- * 4. Kembalikan platformio.ini ke board = esp32dev
- * 5. Upload kode utama ke ESP32
- * 
- * Author: Security System Project
- * Date: October 2025
+ * ESP32 sebagai controller utama yang mengontrol sensor PIR, LED, switch,
+ * dan berkomunikasi dengan ESP32-CAM untuk pengambilan gambar.
  */
 
 #include <Arduino.h>
-#include "esp_camera.h"
-#include "FS.h"
-#include "SD_MMC.h"
-#include "soc/soc.h"
-#include "soc/rtc_cntl_reg.h"
+#include <WiFi.h>
+#include <HTTPClient.h>
 
-// ==================== KONFIGURASI PIN SERIAL2 ====================
-#define RXD2 15  // ESP32-CAM RX2 <- ESP32 TX2 (GPIO17)
-#define TXD2 14  // ESP32-CAM TX2 -> ESP32 RX2 (GPIO16)
+// Pin definitions
+#define PIR_SENSOR_PIN    13
+#define LED_INDICATOR_PIN 33
+#define SWITCH_PIN        12
+#define RXD2 16
+#define TXD2 17
 
-// ==================== KONFIGURASI PIN KAMERA ====================
-// Pin untuk ESP32-CAM AI Thinker
-#define PWDN_GPIO_NUM     32
-#define RESET_GPIO_NUM    -1
-#define XCLK_GPIO_NUM      0
-#define SIOD_GPIO_NUM     26
-#define SIOC_GPIO_NUM     27
-#define Y9_GPIO_NUM       35
-#define Y8_GPIO_NUM       34
-#define Y7_GPIO_NUM       39
-#define Y6_GPIO_NUM       36
-#define Y5_GPIO_NUM       21
-#define Y4_GPIO_NUM       19
-#define Y3_GPIO_NUM       18
-#define Y2_GPIO_NUM        5
-#define VSYNC_GPIO_NUM    25
-#define HREF_GPIO_NUM     23
-#define PCLK_GPIO_NUM     22
+// WiFi credentials
+const char* ssid = "Adhyasta";
+const char* password = "juarasatu";
+const char* serverURL = "http://127.0.1.1:5000/upload";
 
-// ==================== VARIABEL GLOBAL ====================
+// Global variables
+bool systemArmed = true;
+bool motionDetected = false;
 int imageCount = 0;
-bool sdCardAvailable = false;
+unsigned long lastMonitorTime = 0;
+const unsigned long monitorInterval = 10000;
+unsigned long lastSwitchTime = 0;
+const unsigned long debounceDelay = 200;
+unsigned long lastPIRTime = 0;
+const unsigned long pirDebounceDelay = 5000;
 
-// ==================== DEKLARASI FUNGSI ====================
-void initCamera();
-void initSDCard();
-bool captureAndSendImage();
-bool saveImageToSD(camera_fb_t *fb);
-void handleSerialCommands();
+#define MAX_IMAGE_SIZE 60000
+uint8_t imageBuffer[MAX_IMAGE_SIZE];
+size_t imageSize = 0;
 
-// ==================== SETUP ====================
+// Function declarations
+void initWiFi();
+void initPins();
+void initCameraSerial();
+bool requestImageFromCAM();
+bool receiveImageData();
+bool uploadImageToServer(uint8_t* imageData, size_t imageLen);
+void handleMotionDetection();
+void handleSystemSwitch();
+void displayStatus();
+
 void setup() {
-  // Nonaktifkan brownout detector untuk stabilitas
-  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
-  
-  // Inisialisasi Serial untuk debugging (via USB)
   Serial.begin(115200);
   delay(1000);
-  
   Serial.println();
   Serial.println("========================================");
-  Serial.println("  ESP32-CAM Slave Module");
+  Serial.println("  Mini Security System - ESP32 Controller");
   Serial.println("========================================");
-  Serial.println();
   
-  // Inisialisasi Serial2 untuk komunikasi dengan ESP32 Controller
+  initPins();
+  initCameraSerial();
+  initWiFi();
+  
+  Serial.println("  Sistem Siap!");
+  displayStatus();
+}
+
+void loop() {
+  handleSystemSwitch();
+  
+  if (systemArmed) {
+    handleMotionDetection();
+    
+    if (millis() - lastMonitorTime >= monitorInterval) {
+      Serial.println("[STATUS] Monitoring...");
+      lastMonitorTime = millis();
+    }
+  }
+  
+  delay(100);
+}
+
+void initPins() {
+  Serial.println("[INIT] Menginisialisasi pin GPIO...");
+  pinMode(PIR_SENSOR_PIN, INPUT);
+  pinMode(LED_INDICATOR_PIN, OUTPUT);
+  pinMode(SWITCH_PIN, INPUT_PULLUP);
+  digitalWrite(LED_INDICATOR_PIN, LOW);
+  Serial.println("[INIT] Pin GPIO berhasil diinisialisasi");
+}
+
+void initCameraSerial() {
+  Serial.println("[INIT] Menginisialisasi komunikasi dengan ESP32-CAM...");
   Serial2.begin(115200, SERIAL_8N1, RXD2, TXD2);
   delay(1000);
-  Serial.println("[INIT] Serial2 initialized (GPIO14/15)");
   
-  // Inisialisasi kamera
-  initCamera();
+  Serial2.println("TEST");
+  delay(500);
   
-  // Inisialisasi SD Card (opsional untuk backup)
-  initSDCard();
-  
-  Serial.println();
-  Serial.println("========================================");
-  Serial.println("  ESP32-CAM Ready!");
-  Serial.println("========================================");
-  Serial2.println("READY"); // Kirim status ready ke ESP32 controller via Serial2
-  Serial.println();
-}
-
-// ==================== LOOP ====================
-void loop() {
-  // Tunggu perintah dari ESP32 controller
-  handleSerialCommands();
-  delay(10);
-}
-
-// ==================== IMPLEMENTASI FUNGSI ====================
-
-/**
- * Inisialisasi kamera ESP32-CAM
- */
-void initCamera() {
-  Serial.println("[INIT] Menginisialisasi kamera...");
-  
-  // Konfigurasi kamera
-  camera_config_t config;
-  config.ledc_channel = LEDC_CHANNEL_0;
-  config.ledc_timer = LEDC_TIMER_0;
-  config.pin_d0 = Y2_GPIO_NUM;
-  config.pin_d1 = Y3_GPIO_NUM;
-  config.pin_d2 = Y4_GPIO_NUM;
-  config.pin_d3 = Y5_GPIO_NUM;
-  config.pin_d4 = Y6_GPIO_NUM;
-  config.pin_d5 = Y7_GPIO_NUM;
-  config.pin_d6 = Y8_GPIO_NUM;
-  config.pin_d7 = Y9_GPIO_NUM;
-  config.pin_xclk = XCLK_GPIO_NUM;
-  config.pin_pclk = PCLK_GPIO_NUM;
-  config.pin_vsync = VSYNC_GPIO_NUM;
-  config.pin_href = HREF_GPIO_NUM;
-  config.pin_sscb_sda = SIOD_GPIO_NUM;
-  config.pin_sscb_scl = SIOC_GPIO_NUM;
-  config.pin_pwdn = PWDN_GPIO_NUM;
-  config.pin_reset = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 20000000;
-  config.pixel_format = PIXFORMAT_JPEG;
-  
-  // Konfigurasi frame size dan quality (optimal untuk transfer Serial)
-  if(psramFound()){
-    config.frame_size = FRAMESIZE_SVGA;   // 800x600 (lebih kecil untuk Serial)
-    config.jpeg_quality = 12;             // 0-63, semakin kecil semakin bagus
-    config.fb_count = 2;
-  } else {
-    config.frame_size = FRAMESIZE_VGA;    // 640x480
-    config.jpeg_quality = 15;
-    config.fb_count = 1;
-  }
-  
-  // Inisialisasi kamera
-  esp_err_t err = esp_camera_init(&config);
-  if (err != ESP_OK) {
-    Serial.printf("[ERROR] Kamera gagal diinisialisasi: 0x%x\n", err);
-    return;
-  }
-  
-  Serial.println("[INIT] Kamera berhasil diinisialisasi");
-  
-  // Setting tambahan untuk kualitas gambar
-  sensor_t * s = esp_camera_sensor_get();
-  s->set_brightness(s, 0);     // -2 to 2
-  s->set_contrast(s, 0);       // -2 to 2
-  s->set_saturation(s, 0);     // -2 to 2
-  s->set_special_effect(s, 0); // 0 to 6 (0 - No Effect)
-  s->set_whitebal(s, 1);       // 0 = disable , 1 = enable
-  s->set_awb_gain(s, 1);       // 0 = disable , 1 = enable
-  s->set_wb_mode(s, 0);        // 0 to 4
-  s->set_exposure_ctrl(s, 1);  // 0 = disable , 1 = enable
-  s->set_aec2(s, 0);           // 0 = disable , 1 = enable
-  s->set_gain_ctrl(s, 1);      // 0 = disable , 1 = enable
-  s->set_agc_gain(s, 0);       // 0 to 30
-  s->set_gainceiling(s, (gainceiling_t)0);  // 0 to 6
-  s->set_bpc(s, 0);            // 0 = disable , 1 = enable
-  s->set_wpc(s, 1);            // 0 = disable , 1 = enable
-  s->set_raw_gma(s, 1);        // 0 = disable , 1 = enable
-  s->set_lenc(s, 1);           // 0 = disable , 1 = enable
-  s->set_hmirror(s, 0);        // 0 = disable , 1 = enable
-  s->set_vflip(s, 0);          // 0 = disable , 1 = enable
-  s->set_dcw(s, 1);            // 0 = disable , 1 = enable
-  s->set_colorbar(s, 0);       // 0 = disable , 1 = enable
-}
-
-/**
- * Inisialisasi SD Card (opsional untuk backup)
- */
-void initSDCard() {
-  Serial.println("[INIT] Menginisialisasi SD Card...");
-  
-  if(!SD_MMC.begin("/sdcard", true)) { // Mode 1-bit
-    Serial.println("[WARNING] SD Card gagal dimount!");
-    sdCardAvailable = false;
-    return;
-  }
-  
-  uint8_t cardType = SD_MMC.cardType();
-  
-  if(cardType == CARD_NONE) {
-    Serial.println("[WARNING] SD Card tidak terdeteksi!");
-    sdCardAvailable = false;
-    return;
-  }
-  
-  Serial.print("[INIT] SD Card Type: ");
-  if(cardType == CARD_MMC){
-    Serial.println("MMC");
-  } else if(cardType == CARD_SD){
-    Serial.println("SDSC");
-  } else if(cardType == CARD_SDHC){
-    Serial.println("SDHC");
-  } else {
-    Serial.println("UNKNOWN");
-  }
-  
-  uint64_t cardSize = SD_MMC.cardSize() / (1024 * 1024);
-  Serial.printf("[INIT] SD Card Size: %lluMB\n", cardSize);
-  Serial.println("[INIT] SD Card berhasil diinisialisasi");
-  sdCardAvailable = true;
-}
-
-/**
- * Handle perintah Serial dari ESP32 controller
- */
-void handleSerialCommands() {
-  if (Serial2.available()) {  // Baca dari Serial2 (GPIO15)
-    String command = Serial2.readStringUntil('\n');
-    command.trim();
-    
-    Serial.print("[DEBUG] Received command: ");
-    Serial.println(command);
-    
-    if (command == "TEST") {
-      // Response untuk test koneksi
-      Serial2.println("READY");
-      Serial.println("[CMD] Sent READY");
+  if (Serial2.available()) {
+    String response = Serial2.readStringUntil('\n');
+    if (response.indexOf("READY") >= 0) {
+      Serial.println("[INIT] ESP32-CAM berhasil terhubung!");
+    } else {
+      Serial.println("[WARNING] ESP32-CAM merespons tapi status tidak jelas");
     }
-    else if (command == "CAPTURE") {
-      // Ambil dan kirim gambar
-      Serial.println("[CMD] Capture command received");
-      bool success = captureAndSendImage();
-      if (!success) {
-        Serial2.println("ERROR");
-        Serial.println("[CMD] Sent ERROR");
+  } else {
+    Serial.println("[WARNING] ESP32-CAM tidak merespons!");
+    Serial.println("[WARNING] Pastikan ESP32-CAM sudah diprogram dan terhubung");
+  }
+}
+
+void initWiFi() {
+  Serial.println("[INIT] Menghubungkan ke WiFi...");
+  Serial.print("[INIT] SSID: ");
+  Serial.println(ssid);
+  
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+  
+  Serial.println();
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("[INIT] WiFi berhasil terhubung!");
+    Serial.print("[INIT] IP Address: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("[ERROR] WiFi gagal terhubung!");
+  }
+}
+
+bool requestImageFromCAM() {
+  Serial.println("[CAMERA] Mengirim perintah ke ESP32-CAM...");
+  Serial2.println("CAPTURE");
+  
+  unsigned long startTime = millis();
+  while (millis() - startTime < 5000) {
+    if (Serial2.available()) {
+      String response = Serial2.readStringUntil('\n');
+      response.trim();
+      
+      if (response.indexOf("OK") >= 0) {
+        Serial.println("[CAMERA] ESP32-CAM siap mengirim data");
+        return receiveImageData();
+      } else if (response.indexOf("ERROR") >= 0) {
+        Serial.println("[ERROR] ESP32-CAM gagal mengambil foto");
+        return false;
       }
     }
+    delay(10);
   }
+  
+  Serial.println("[ERROR] Timeout menunggu response");
+  return false;
 }
 
-/**
- * Mengambil foto dan mengirim via Serial2
- */
-bool captureAndSendImage() {
-  Serial.println("[CAMERA] Mengambil foto...");
+bool receiveImageData() {
+  Serial.println("[CAMERA] Menerima data gambar...");
+  imageSize = 0;
+  unsigned long startTime = millis();
+  bool receivingData = false;
   
-  // Ambil foto dari kamera
-  camera_fb_t * fb = esp_camera_fb_get();
-  if (!fb) {
-    Serial.println("[ERROR] Gagal mengambil foto!");
-    return false;
+  while (millis() - startTime < 10000) {
+    if (Serial2.available()) {
+      if (!receivingData) {
+        String header = Serial2.readStringUntil(':');
+        if (header.indexOf("SIZE") >= 0) {
+          imageSize = Serial2.parseInt();
+          Serial2.read();
+          
+          if (imageSize > 0 && imageSize <= MAX_IMAGE_SIZE) {
+            Serial.printf("[CAMERA] Ukuran gambar: %d bytes\n", imageSize);
+            receivingData = true;
+            startTime = millis();
+          } else {
+            Serial.println("[ERROR] Ukuran gambar tidak valid!");
+            return false;
+          }
+        }
+      } else {
+        size_t bytesRead = Serial2.readBytes(imageBuffer, imageSize);
+        
+        if (bytesRead == imageSize) {
+          Serial.printf("[CAMERA] Berhasil menerima %d bytes\n", bytesRead);
+          imageCount++;
+          return true;
+        } else {
+          Serial.printf("[ERROR] Data tidak lengkap! %d/%d\n", bytesRead, imageSize);
+          return false;
+        }
+      }
+    }
+    delay(10);
   }
   
-  Serial.printf("[CAMERA] Foto berhasil diambil! Ukuran: %d bytes\n", fb->len);
-  
-  // Backup ke SD Card jika tersedia
-  if (sdCardAvailable) {
-    saveImageToSD(fb);
-  }
-  
-  // Kirim response OK dan ukuran gambar via Serial2
-  Serial2.println("OK");
-  Serial.println("[CAMERA] Sent OK to controller");
-  delay(100); // Beri waktu ESP32 controller untuk siap menerima
-  
-  // Kirim header dengan ukuran gambar
-  Serial2.printf("SIZE:%d\n", fb->len);
-  Serial.printf("[CAMERA] Sent SIZE:%d\n", fb->len);
-  delay(100);
-  
-  // Kirim raw binary data via Serial2
-  Serial2.write(fb->buf, fb->len);
-  Serial2.flush(); // Pastikan semua data terkirim
-  
-  Serial.println("[CAMERA] Gambar berhasil dikirim via Serial2");
-  
-  // Kembalikan frame buffer
-  esp_camera_fb_return(fb);
-  
-  return true;
+  Serial.println("[ERROR] Timeout menerima data");
+  return false;
 }
 
-/**
- * Simpan gambar ke SD Card (backup)
- */
-bool saveImageToSD(camera_fb_t *fb) {
-  if (!sdCardAvailable) {
+bool uploadImageToServer(uint8_t* imageData, size_t imageLen) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[WARNING] WiFi tidak terhubung");
     return false;
   }
   
-  imageCount++;
-  char filename[32];
-  sprintf(filename, "/image%03d.jpg", imageCount);
+  Serial.println("[HTTP] Mengirim foto ke server...");
+  HTTPClient http;
+  http.begin(serverURL);
+  http.addHeader("Content-Type", "image/jpeg");
   
-  Serial.printf("[SD] Menyimpan backup ke: %s\n", filename);
+  int httpResponseCode = http.POST(imageData, imageLen);
   
-  File file = SD_MMC.open(filename, FILE_WRITE);
-  if (!file) {
-    Serial.println("[ERROR] Gagal membuka file!");
-    return false;
-  }
-  
-  size_t written = file.write(fb->buf, fb->len);
-  file.close();
-  
-  if (written == fb->len) {
-    Serial.printf("[SD] Backup berhasil! (%d bytes)\n", written);
+  if (httpResponseCode > 0) {
+    Serial.printf("[HTTP] Response code: %d\n", httpResponseCode);
+    String response = http.getString();
+    Serial.printf("[HTTP] Response: %s\n", response.c_str());
+    http.end();
     return true;
   } else {
-    Serial.println("[ERROR] Gagal menulis backup!");
+    Serial.printf("[ERROR] HTTP POST gagal: %s\n", http.errorToString(httpResponseCode).c_str());
+    http.end();
     return false;
   }
+}
+
+void handleMotionDetection() {
+  int pirState = digitalRead(PIR_SENSOR_PIN);
+  
+  if (pirState == HIGH && !motionDetected) {
+    if (millis() - lastPIRTime >= pirDebounceDelay) {
+      motionDetected = true;
+      lastPIRTime = millis();
+      
+      Serial.println();
+      Serial.println("========================================");
+      Serial.println("[ALERT] Motion Detected!");
+      Serial.println("========================================");
+      
+      digitalWrite(LED_INDICATOR_PIN, HIGH);
+      Serial.println("[ACTION] LED dihidupkan");
+      
+      bool success = requestImageFromCAM();
+      
+      if (success) {
+        Serial.println("[SUCCESS] Image Captured");
+        uploadImageToServer(imageBuffer, imageSize);
+      } else {
+        Serial.println("[ERROR] Gagal mengambil gambar");
+      }
+      
+      delay(1000);
+      digitalWrite(LED_INDICATOR_PIN, LOW);
+      Serial.println("[ACTION] LED dimatikan");
+      Serial.println("========================================");
+    }
+  }
+  
+  if (pirState == LOW && motionDetected) {
+    motionDetected = false;
+  }
+}
+
+void handleSystemSwitch() {
+  int switchState = digitalRead(SWITCH_PIN);
+  
+  if (switchState == LOW) {
+    if (millis() - lastSwitchTime >= debounceDelay) {
+      systemArmed = !systemArmed;
+      lastSwitchTime = millis();
+      
+      Serial.println();
+      Serial.println("========================================");
+      displayStatus();
+      Serial.println("========================================");
+      
+      if (!systemArmed) {
+        digitalWrite(LED_INDICATOR_PIN, LOW);
+      }
+      
+      lastMonitorTime = millis();
+    }
+  }
+}
+
+void displayStatus() {
+  if (systemArmed) {
+    Serial.println("[STATUS] System Armed - Monitoring aktif");
+  } else {
+    Serial.println("[STATUS] System Disarmed - Monitoring tidak aktif");
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("[STATUS] WiFi Connected - IP: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("[STATUS] WiFi Disconnected");
+  }
+  
+  Serial.printf("[STATUS] Images captured: %d\n", imageCount);
 }
