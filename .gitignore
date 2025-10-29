@@ -35,6 +35,7 @@ PANDUAN_UPLOAD.md
 UPLOAD_ESP32CAM_TANPA_TOMBOL_BOOT.md
 QUICKSTART.md
 SETUP_GUIDE.md
+.gitignore-info.md
 
 # ============================================
 # Server Files Lama (Deprecated)
