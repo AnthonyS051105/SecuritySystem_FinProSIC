@@ -22,7 +22,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // Pin definitions
 #define PIR_SENSOR_PIN    13
-#define LED_INDICATOR_PIN 4
+#define LED_INDICATOR_PIN 33
 #define SWITCH_PIN        12
 
 // WiFi credentials
@@ -31,7 +31,7 @@ const char* password = "juarasatu";
 
 // Server URL - GANTI dengan IP laptop Anda!
 // Jalankan: hostname -I di laptop
-const char* captureURL = "http://10.137.208.149:5000/capture";  // GANTI IP INI!
+const char* captureURL = "http://10.158.139.149:5000/capture";  // IP laptop saat ini
 
 // Global variables
 bool systemArmed = true;

@@ -1,0 +1,45 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "PlatformIO: Build",
+			"type": "shell",
+			"command": "~/.platformio/penv/bin/platformio",
+			"args": [
+				"run"
+			],
+			"problemMatcher": [
+				"$gcc"
+			],
+			"group": "build"
+		},
+		{
+			"label": "PlatformIO: Upload",
+			"type": "shell",
+			"command": "~/.platformio/penv/bin/platformio",
+			"args": [
+				"run",
+				"--target",
+				"upload"
+			],
+			"problemMatcher": [
+				"$gcc"
+			],
+			"group": "build"
+		},
+		{
+			"label": "PlatformIO: Build and Upload",
+			"type": "shell",
+			"command": "~/.platformio/penv/bin/platformio",
+			"args": [
+				"run",
+				"--target",
+				"upload"
+			],
+			"problemMatcher": [
+				"$gcc"
+			],
+			"group": "build"
+		}
+	]
+}

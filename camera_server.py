@@ -25,7 +25,7 @@ os.makedirs(CAPTURE_FOLDER, exist_ok=True)
 camera = None
 
 def init_camera():
-    """Inisialisasi webcam laptop"""
+    """Inisialisasi webcam laptop dengan optimasi"""
     global camera
     if camera is None or not camera.isOpened():
         camera = cv2.VideoCapture(0)
@@ -33,20 +33,32 @@ def init_camera():
             print("[ERROR] Tidak dapat membuka webcam!")
             return False
         
-        # Set resolusi (opsional)
+        # Set resolusi untuk performa lebih baik
         camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         
-        print("[INIT] Webcam berhasil diinisialisasi!")
+        # OPTIMASI: Set buffer size rendah untuk mengurangi lag
+        camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        
+        # OPTIMASI: Warm-up camera (ambil beberapa frame dummy)
+        print("[INIT] Warming up camera...")
+        for _ in range(5):
+            camera.read()  # Discard dummy frames
+        
+        print("[INIT] Webcam berhasil diinisialisasi dan ready!")
         return True
     return True
 
 def capture_image():
-    """Capture gambar dari webcam"""
+    """Capture gambar dari webcam dengan optimasi"""
     if not init_camera():
         return None
     
-    # Ambil frame dari webcam
+    # OPTIMASI: Flush old frames dari buffer
+    for _ in range(2):
+        camera.grab()  # Discard buffered frames
+    
+    # Ambil frame fresh dari webcam
     ret, frame = camera.read()
     
     if not ret:
@@ -58,8 +70,8 @@ def capture_image():
     filename = f"motion_{timestamp}.jpg"
     filepath = os.path.join(CAPTURE_FOLDER, filename)
     
-    # Simpan gambar
-    cv2.imwrite(filepath, frame)
+    # OPTIMASI: Simpan dengan kompresi JPEG quality 85 (balance speed vs quality)
+    cv2.imwrite(filepath, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
     print(f"[CAMERA] Foto disimpan: {filename}")
     
     return filepath
