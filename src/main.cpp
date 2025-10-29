@@ -1,9 +1,9 @@
 /*
- * Mini Security System - ESP32 Controller (Main Board)
+ * Mini Security System - ESP32 Controller dengan Webcam Laptop
  * 
- * ESP32 sebagai controller utama yang mengontrol sensor PIR, LED, switch,
- * dan berkomunikasi dengan ESP32-CAM untuk pengambilan gambar.
- * Dilengkapi OLED display untuk menampilkan status sistem.
+ * ESP32 sebagai controller utama yang mengontrol sensor PIR, LED, switch, dan OLED.
+ * Saat PIR mendeteksi gerakan, ESP32 mengirim HTTP trigger ke server Python
+ * yang akan mengambil foto dari webcam laptop.
  */
 
 #include <Arduino.h>
@@ -22,18 +22,16 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // Pin definitions
 #define PIR_SENSOR_PIN    13
-#define LED_INDICATOR_PIN 33
+#define LED_INDICATOR_PIN 4
 #define SWITCH_PIN        12
-#define RXD2 16
-#define TXD2 17
 
 // WiFi credentials
 const char* ssid = "Adhyasta";
 const char* password = "juarasatu";
-// ⚠️ GANTI IP INI dengan IP komputer yang menjalankan server!
-// Jalankan: hostname -I
-// Contoh: "http://192.168.1.100:5000/upload"
-const char* serverURL = "http://10.137.208.149:5000/upload";  // GANTI IP INI!
+
+// Server URL - GANTI dengan IP laptop Anda!
+// Jalankan: hostname -I di laptop
+const char* captureURL = "http://10.137.208.149:5000/capture";  // GANTI IP INI!
 
 // Global variables
 bool systemArmed = true;
@@ -46,19 +44,12 @@ const unsigned long debounceDelay = 200;
 unsigned long lastPIRTime = 0;
 const unsigned long pirDebounceDelay = 5000;
 
-#define MAX_IMAGE_SIZE 60000
-uint8_t imageBuffer[MAX_IMAGE_SIZE];
-size_t imageSize = 0;
-
 // Function declarations
 void initWiFi();
 void initPins();
-void initCameraSerial();
 void initOLED();
 void updateOLED(String line1, String line2 = "", String line3 = "", String line4 = "");
-bool requestImageFromCAM();
-bool receiveImageData();
-bool uploadImageToServer(uint8_t* imageData, size_t imageLen);
+bool triggerCameraCapture();
 void handleMotionDetection();
 void handleSystemSwitch();
 void displayStatus();
@@ -68,16 +59,15 @@ void setup() {
   delay(1000);
   Serial.println();
   Serial.println("========================================");
-  Serial.println("  Mini Security System - ESP32 Controller");
+  Serial.println("  Security System - ESP32 + Webcam");
   Serial.println("========================================");
   
   initPins();
-  initOLED();  // Inisialisasi OLED
+  initOLED();
   
   updateOLED("System Starting", "Please wait...");
   delay(1000);
   
-  initCameraSerial();
   initWiFi();
   
   Serial.println("  Sistem Siap!");
@@ -102,19 +92,12 @@ void loop() {
   delay(100);
 }
 
-/**
- * Inisialisasi OLED Display
- */
 void initOLED() {
   Serial.println("[INIT] Menginisialisasi OLED display...");
-  
-  // Inisialisasi I2C untuk OLED (SDA=21, SCL=22 default ESP32)
   Wire.begin();
   
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDRESS)) {
-    Serial.println("[ERROR] OLED tidak ditemukan!");
-    Serial.println("[ERROR] Cek wiring: SDA=GPIO21, SCL=GPIO22, VCC=3.3V, GND=GND");
-    // Lanjutkan tanpa OLED
+    Serial.println("[WARNING] OLED tidak ditemukan! Lanjutkan tanpa OLED...");
     return;
   }
   
@@ -129,20 +112,15 @@ void initOLED() {
   Serial.println("[INIT] OLED berhasil diinisialisasi");
 }
 
-/**
- * Update tampilan OLED
- */
 void updateOLED(String line1, String line2, String line3, String line4) {
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   
-  // Line 1 (Besar)
   display.setCursor(0, 0);
   display.setTextSize(2);
   display.println(line1);
   
-  // Line 2-4 (Kecil)
   display.setTextSize(1);
   display.setCursor(0, 20);
   display.println(line2);
@@ -163,40 +141,8 @@ void initPins() {
   Serial.println("[INIT] Pin GPIO berhasil diinisialisasi");
 }
 
-void initCameraSerial() {
-  Serial.println("[INIT] Menginisialisasi komunikasi dengan ESP32-CAM...");
-  updateOLED("Init CAM", "Connecting...");
-  
-  Serial2.begin(115200, SERIAL_8N1, RXD2, TXD2);
-  delay(1000);
-  
-  Serial2.println("TEST");
-  delay(500);
-  
-  if (Serial2.available()) {
-    String response = Serial2.readStringUntil('\n');
-    if (response.indexOf("READY") >= 0) {
-      Serial.println("[INIT] ESP32-CAM berhasil terhubung!");
-      updateOLED("CAM", "Connected!", "", "");
-      delay(1000);
-    } else {
-      Serial.println("[WARNING] ESP32-CAM merespons tapi status tidak jelas");
-      updateOLED("CAM", "Unknown status", "", "");
-      delay(1000);
-    }
-  } else {
-    Serial.println("[WARNING] ESP32-CAM tidak merespons!");
-    Serial.println("[WARNING] Pastikan ESP32-CAM sudah diprogram dan terhubung");
-    updateOLED("CAM ERROR", "Not responding", "Check wiring", "");
-    delay(2000);
-  }
-}
-
 void initWiFi() {
   Serial.println("[INIT] Menghubungkan ke WiFi...");
-  Serial.print("[INIT] SSID: ");
-  Serial.println(ssid);
-  
   updateOLED("WiFi", String("SSID: ") + String(ssid), "Connecting...");
   
   WiFi.mode(WIFI_STA);
@@ -220,94 +166,25 @@ void initWiFi() {
     delay(1500);
   } else {
     Serial.println("[ERROR] WiFi gagal terhubung!");
-    Serial.println("[ERROR] Periksa SSID dan password");
-    Serial.println("[ERROR] Pastikan WiFi 2.4GHz (bukan 5GHz)");
-    
     updateOLED("WiFi ERROR", "Check SSID/Pass", "Use 2.4GHz", "");
     delay(2000);
   }
 }
 
-bool requestImageFromCAM() {
-  Serial.println("[CAMERA] Mengirim perintah ke ESP32-CAM...");
-  Serial2.println("CAPTURE");
-  
-  unsigned long startTime = millis();
-  while (millis() - startTime < 5000) {
-    if (Serial2.available()) {
-      String response = Serial2.readStringUntil('\n');
-      response.trim();
-      
-      if (response.indexOf("OK") >= 0) {
-        Serial.println("[CAMERA] ESP32-CAM siap mengirim data");
-        return receiveImageData();
-      } else if (response.indexOf("ERROR") >= 0) {
-        Serial.println("[ERROR] ESP32-CAM gagal mengambil foto");
-        return false;
-      }
-    }
-    delay(10);
-  }
-  
-  Serial.println("[ERROR] Timeout menunggu response");
-  return false;
-}
-
-bool receiveImageData() {
-  Serial.println("[CAMERA] Menerima data gambar...");
-  imageSize = 0;
-  unsigned long startTime = millis();
-  bool receivingData = false;
-  
-  while (millis() - startTime < 10000) {
-    if (Serial2.available()) {
-      if (!receivingData) {
-        String header = Serial2.readStringUntil(':');
-        if (header.indexOf("SIZE") >= 0) {
-          imageSize = Serial2.parseInt();
-          Serial2.read();
-          
-          if (imageSize > 0 && imageSize <= MAX_IMAGE_SIZE) {
-            Serial.printf("[CAMERA] Ukuran gambar: %d bytes\n", imageSize);
-            receivingData = true;
-            startTime = millis();
-          } else {
-            Serial.println("[ERROR] Ukuran gambar tidak valid!");
-            return false;
-          }
-        }
-      } else {
-        size_t bytesRead = Serial2.readBytes(imageBuffer, imageSize);
-        
-        if (bytesRead == imageSize) {
-          Serial.printf("[CAMERA] Berhasil menerima %d bytes\n", bytesRead);
-          imageCount++;
-          return true;
-        } else {
-          Serial.printf("[ERROR] Data tidak lengkap! %d/%d\n", bytesRead, imageSize);
-          return false;
-        }
-      }
-    }
-    delay(10);
-  }
-  
-  Serial.println("[ERROR] Timeout menerima data");
-  return false;
-}
-
-bool uploadImageToServer(uint8_t* imageData, size_t imageLen) {
+bool triggerCameraCapture() {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("[WARNING] WiFi tidak terhubung");
     return false;
   }
   
-  Serial.println("[HTTP] Mengirim foto ke server...");
+  Serial.println("[CAMERA] Mengirim trigger ke server...");
   HTTPClient http;
-  http.begin(serverURL);
-  http.addHeader("Content-Type", "image/jpeg");
+  http.begin(captureURL);
+  http.addHeader("Content-Type", "application/json");
   
-  int httpResponseCode = http.POST(imageData, imageLen);
+  // Kirim POST request kosong atau dengan data sederhana
+  String jsonData = "{\"source\":\"esp32\",\"motion\":true}";
+  int httpResponseCode = http.POST(jsonData);
   
   if (httpResponseCode > 0) {
     Serial.printf("[HTTP] Response code: %d\n", httpResponseCode);
@@ -340,16 +217,17 @@ void handleMotionDetection() {
       digitalWrite(LED_INDICATOR_PIN, HIGH);
       Serial.println("[ACTION] LED dihidupkan");
       
-      bool success = requestImageFromCAM();
+      // Trigger webcam capture via HTTP
+      bool success = triggerCameraCapture();
       
       if (success) {
-        Serial.println("[SUCCESS] Image Captured");
-        uploadImageToServer(imageBuffer, imageSize);
-        updateOLED("Image Sent", String("Count: ") + String(imageCount), "", "");
+        Serial.println("[SUCCESS] Capture triggered!");
+        imageCount++;
+        updateOLED("Photo Taken!", String("Count: ") + String(imageCount), "Check gallery", "");
         delay(1500);
       } else {
-        Serial.println("[ERROR] Gagal mengambil gambar");
-        updateOLED("CAM ERROR", "Capture Failed", "", "");
+        Serial.println("[ERROR] Gagal trigger capture");
+        updateOLED("SERVER ERROR", "Check connection", "", "");
         delay(2000);
       }
       
@@ -378,7 +256,6 @@ void handleSystemSwitch() {
       displayStatus();
       Serial.println("========================================");
       
-      // Update OLED with system status
       if (systemArmed) {
         updateOLED("SYSTEM", "ARMED", "Ready to Detect", "");
       } else {
@@ -411,10 +288,9 @@ void displayStatus() {
   
   Serial.printf("[STATUS] Images captured: %d\n", imageCount);
   
-  // Update OLED with comprehensive status
   String line1 = systemArmed ? "ARMED" : "DISARMED";
   String line2 = WiFi.status() == WL_CONNECTED ? "WiFi: OK" : "WiFi: FAIL";
-  String line3 = String("Images: ") + String(imageCount);
+  String line3 = String("Photos: ") + String(imageCount);
   String line4 = "";
   
   updateOLED(line1, line2, line3, line4);
